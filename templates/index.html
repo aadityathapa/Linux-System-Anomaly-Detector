@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Linux Anomaly Detector</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #080c0f;
+      --surface: #0d1419;
+      --border: #1a2530;
+      --accent: #00e5ff;
+      --accent2: #ff3d71;
+      --accent3: #a8ff3e;
+      --text: #c8d8e8;
+      --muted: #4a6070;
+      --normal: #a8ff3e;
+      --anomaly: #ff3d71;
+      --warn: #ffb700;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 13px;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* Scanline overlay */
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,0,0,0.07) 2px,
+        rgba(0,0,0,0.07) 4px
+      );
+      pointer-events: none;
+      z-index: 999;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 28px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface);
+      position: sticky; top: 0; z-index: 10;
+    }
+
+    .logo {
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: 18px;
+      letter-spacing: 0.08em;
+      color: var(--accent);
+      text-transform: uppercase;
+    }
+    .logo span { color: var(--text); font-weight: 400; }
+
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    #model-status {
+      font-size: 11px;
+      padding: 4px 10px;
+      border-radius: 2px;
+      border: 1px solid;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+    .status-ok  { color: var(--normal);  border-color: var(--normal);  }
+    .status-err { color: var(--anomaly); border-color: var(--anomaly); }
+
+    #clock {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    /* Live anomaly banner */
+    #alert-banner {
+      display: none;
+      background: rgba(255,61,113,0.12);
+      border-bottom: 1px solid var(--anomaly);
+      padding: 8px 28px;
+      color: var(--anomaly);
+      font-size: 12px;
+      letter-spacing: 0.05em;
+      animation: pulse-border 1.5s infinite;
+    }
+    @keyframes pulse-border {
+      0%,100% { border-color: rgba(255,61,113,0.4); }
+      50%      { border-color: rgba(255,61,113,1);   }
+    }
+
+    main { padding: 20px 28px; }
+
+    /* Top stats row */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 14px 16px;
+      position: relative;
+      overflow: hidden;
+      transition: border-color 0.3s;
+    }
+    .stat-card::before {
+      content: '';
+      position: absolute; top: 0; left: 0; right: 0;
+      height: 2px;
+      background: var(--accent);
+      opacity: 0.6;
+      transition: opacity 0.3s;
+    }
+    .stat-card.anomaly-card::before { background: var(--anomaly); opacity: 1; }
+    .stat-card.warn-card::before    { background: var(--warn);    opacity: 1; }
+
+    .stat-label {
+      color: var(--muted);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      margin-bottom: 8px;
+    }
+    .stat-value {
+      font-size: 26px;
+      font-weight: 700;
+      line-height: 1;
+      color: var(--text);
+      font-family: 'Syne', sans-serif;
+    }
+    .stat-unit { font-size: 11px; color: var(--muted); margin-left: 3px; }
+    .stat-sub  { font-size: 10px; color: var(--muted); margin-top: 6px; }
+
+    /* Anomaly score ring */
+    #score-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+    }
+    .ring-wrap { position: relative; width: 80px; height: 80px; margin: 4px auto; }
+    .ring-wrap svg { transform: rotate(-90deg); }
+    .ring-bg { fill: none; stroke: var(--border); stroke-width: 6; }
+    .ring-fg { fill: none; stroke-width: 6; stroke-linecap: round;
+                transition: stroke-dashoffset 0.8s ease, stroke 0.4s; }
+    #ring-label {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-family: 'Syne', sans-serif;
+      font-weight: 800;
+      font-size: 18px;
+    }
+
+    /* Charts */
+    .charts-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin-bottom: 20px;
+    }
+    @media (max-width: 860px) { .charts-grid { grid-template-columns: 1fr; } }
+
+    .chart-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 16px;
+    }
+    .chart-title {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+    .chart-wrap { height: 160px; }
+
+    /* Anomaly log */
+    .log-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 16px;
+    }
+    .log-title {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+    }
+    #anomaly-count {
+      color: var(--anomaly);
+    }
+
+    .log-table { width: 100%; border-collapse: collapse; }
+    .log-table th {
+      text-align: left;
+      color: var(--muted);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 4px 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .log-table td {
+      padding: 6px 8px;
+      font-size: 12px;
+      border-bottom: 1px solid rgba(26,37,48,0.5);
+    }
+    .log-table tr:hover td { background: rgba(0,229,255,0.03); }
+
+    .tag {
+      display: inline-block;
+      padding: 2px 7px;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      border-radius: 2px;
+    }
+    .tag-anomaly { background: rgba(255,61,113,0.15); color: var(--anomaly); }
+    .tag-normal  { background: rgba(168,255,62,0.1);  color: var(--normal);  }
+
+    #no-anomalies { color: var(--muted); font-size: 12px; padding: 12px 0; }
+
+    /* Process info */
+    .proc-info { color: var(--muted); font-size: 11px; margin-top: 4px; }
+
+    /* Blinking cursor */
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+    .cursor { display: inline-block; animation: blink 1s infinite; }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">SysWatch<span> // anomaly detector</span></div>
+  <div class="header-right">
+    <div id="model-status" class="{{ 'status-ok' if model_loaded else 'status-err' }}">
+      {{ 'model loaded' if model_loaded else 'no model — run train.py' }}
+    </div>
+    <div id="clock">--:--:--</div>
+  </div>
+</header>
+
+<div id="alert-banner">
+  ⚠ ANOMALY DETECTED — score below threshold <span id="alert-detail"></span>
+</div>
+
+<main>
+
+  <!-- Stats row -->
+  <div class="stats-grid">
+    <!-- Anomaly score -->
+    <div class="stat-card" id="score-card">
+      <div class="stat-label">Anomaly Score</div>
+      <div class="ring-wrap">
+        <svg viewBox="0 0 80 80" width="80" height="80">
+          <circle class="ring-bg" cx="40" cy="40" r="34"/>
+          <circle class="ring-fg" id="ring-fg" cx="40" cy="40" r="34"
+            stroke-dasharray="213.6"
+            stroke-dashoffset="0"
+            stroke="var(--normal)"/>
+        </svg>
+        <div id="ring-label">—</div>
+      </div>
+      <div id="ring-status" class="stat-sub" style="text-align:center">waiting...</div>
+    </div>
+
+    <div class="stat-card" id="cpu-card">
+      <div class="stat-label">CPU Usage</div>
+      <div class="stat-value" id="cpu-val">—<span class="stat-unit">%</span></div>
+      <div class="stat-sub" id="cpu-freq">— MHz</div>
+      <div class="stat-sub" id="cpu-load">load —</div>
+    </div>
+
+    <div class="stat-card" id="mem-card">
+      <div class="stat-label">Memory</div>
+      <div class="stat-value" id="mem-val">—<span class="stat-unit">%</span></div>
+      <div class="stat-sub" id="mem-used">— MB used</div>
+      <div class="stat-sub" id="swap-val">swap —%</div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-label">Processes</div>
+      <div class="stat-value" id="proc-val">—</div>
+      <div class="stat-sub" id="thread-val">— threads</div>
+      <div class="stat-sub proc-info" id="top-cpu">top cpu: —</div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-label">Disk I/O</div>
+      <div class="stat-value" id="disk-r">—<span class="stat-unit">MB/s</span></div>
+      <div class="stat-sub" id="disk-w">write —</div>
+    </div>
+
+    <div class="stat-card">
+      <div class="stat-label">Network</div>
+      <div class="stat-value" id="net-r">—<span class="stat-unit">MB/s</span></div>
+      <div class="stat-sub" id="net-s">sent —</div>
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div class="charts-grid">
+    <div class="chart-card">
+      <div class="chart-title">CPU % — last 100 samples</div>
+      <div class="chart-wrap"><canvas id="chart-cpu"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Memory % — last 100 samples</div>
+      <div class="chart-wrap"><canvas id="chart-mem"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Anomaly Score — last 100 samples</div>
+      <div class="chart-wrap"><canvas id="chart-score"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Network MB/interval — last 100 samples</div>
+      <div class="chart-wrap"><canvas id="chart-net"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Anomaly log -->
+  <div class="log-card">
+    <div class="log-title">
+      <span>Recent Anomalies <span class="cursor">_</span></span>
+      <span id="anomaly-count">0 flagged</span>
+    </div>
+    <div id="no-anomalies">No anomalies detected yet.</div>
+    <table class="log-table" id="anomaly-table" style="display:none">
+      <thead>
+        <tr>
+          <th>Timestamp</th>
+          <th>Score</th>
+          <th>CPU%</th>
+          <th>MEM%</th>
+          <th>Procs</th>
+          <th>Top CPU Process</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="anomaly-tbody"></tbody>
+    </table>
+  </div>
+
+</main>
+
+<script>
+  // ── Clock ────────────────────────────────────────────────
+  function updateClock() {
+    document.getElementById('clock').textContent =
+      new Date().toLocaleTimeString('en-GB', {hour12: false});
+  }
+  updateClock();
+  setInterval(updateClock, 1000);
+
+  // ── Chart helpers ────────────────────────────────────────
+  const chartDefaults = {
+    type: 'line',
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { display: false },
+        y: {
+          grid: { color: 'rgba(26,37,48,0.8)' },
+          ticks: { color: '#4a6070', font: { family: 'JetBrains Mono', size: 10 } },
+          border: { color: '#1a2530' }
+        }
+      },
+      elements: { point: { radius: 0 } }
+    }
+  };
+
+  function makeChart(id, color, min, max) {
+    const ctx = document.getElementById(id).getContext('2d');
+    const cfg = JSON.parse(JSON.stringify(chartDefaults));
+    if (min !== undefined) cfg.options.scales.y.min = min;
+    if (max !== undefined) cfg.options.scales.y.max = max;
+    return new Chart(ctx, {
+      ...cfg,
+      data: {
+        labels: [],
+        datasets: [{
+          data: [],
+          borderColor: color,
+          borderWidth: 1.5,
+          backgroundColor: color.replace(')', ', 0.07)').replace('rgb', 'rgba'),
+          fill: true,
+          tension: 0.3,
+        }]
+      }
+    });
+  }
+
+  const chartCpu   = makeChart('chart-cpu',   'rgb(0,229,255)',   0, 100);
+  const chartMem   = makeChart('chart-mem',   'rgb(168,255,62)',  0, 100);
+  const chartScore = makeChart('chart-score', 'rgb(255,183,0)',   0, 100);
+  const chartNet   = makeChart('chart-net',   'rgb(200,140,255)', 0);
+
+  function pushData(chart, label, value, limit=100) {
+    chart.data.labels.push(label);
+    chart.data.datasets[0].data.push(value);
+    if (chart.data.labels.length > limit) {
+      chart.data.labels.shift();
+      chart.data.datasets[0].data.shift();
+    }
+    chart.update();
+  }
+
+  // ── Anomaly ring ─────────────────────────────────────────
+  const CIRCUMFERENCE = 213.6;
+  function setRing(score, label) {
+    const fg = document.getElementById('ring-fg');
+    const lbl = document.getElementById('ring-label');
+    const status = document.getElementById('ring-status');
+    const offset = score === null ? CIRCUMFERENCE : CIRCUMFERENCE * (1 - score / 100);
+    fg.style.strokeDashoffset = offset;
+    lbl.textContent = score === null ? '—' : score;
+    if (label === 'anomaly') {
+      fg.style.stroke = 'var(--anomaly)';
+      lbl.style.color = 'var(--anomaly)';
+      status.textContent = '⚠ anomaly';
+      status.style.color = 'var(--anomaly)';
+    } else if (label === 'normal') {
+      fg.style.stroke = 'var(--normal)';
+      lbl.style.color = 'var(--normal)';
+      status.textContent = '✓ normal';
+      status.style.color = 'var(--normal)';
+    } else {
+      fg.style.stroke = 'var(--muted)';
+      lbl.style.color = 'var(--muted)';
+      status.textContent = 'no model';
+    }
+  }
+
+  function setCard(id, isHigh) {
+    document.getElementById(id).classList.toggle('anomaly-card', isHigh);
+  }
+
+  // ── Live metrics fetch ───────────────────────────────────
+  async function fetchLive() {
+    try {
+      const res  = await fetch('/api/live');
+      const d    = await res.json();
+      const ts   = new Date().toLocaleTimeString('en-GB', {hour12: false});
+
+      // Stats
+      document.getElementById('cpu-val').innerHTML   = `${d.cpu_percent.toFixed(1)}<span class="stat-unit">%</span>`;
+      document.getElementById('cpu-freq').textContent = `${d.cpu_freq_mhz.toFixed(0)} MHz`;
+      document.getElementById('cpu-load').textContent = `load ${d.load_avg_1m} / ${d.load_avg_5m}`;
+      document.getElementById('mem-val').innerHTML   = `${d.mem_percent.toFixed(1)}<span class="stat-unit">%</span>`;
+      document.getElementById('mem-used').textContent = `${d.mem_used_mb.toFixed(0)} MB used`;
+      document.getElementById('swap-val').textContent = `swap ${d.swap_percent.toFixed(1)}%`;
+      document.getElementById('proc-val').textContent = d.num_processes;
+      document.getElementById('thread-val').textContent = `${d.num_threads} threads`;
+      document.getElementById('top-cpu').textContent = `top cpu: ${d.top_cpu_proc || '—'}`;
+      document.getElementById('disk-r').innerHTML = `${d.disk_read_mb.toFixed(2)}<span class="stat-unit">MB</span>`;
+      document.getElementById('disk-w').textContent = `write ${d.disk_write_mb.toFixed(2)} MB`;
+      document.getElementById('net-r').innerHTML = `${d.net_recv_mb.toFixed(2)}<span class="stat-unit">MB</span>`;
+      document.getElementById('net-s').textContent = `sent ${d.net_sent_mb.toFixed(2)} MB`;
+
+      // Score ring
+      setRing(d.score, d.label);
+
+      // Alert banner
+      const banner = document.getElementById('alert-banner');
+      if (d.label === 'anomaly') {
+        banner.style.display = 'block';
+        document.getElementById('alert-detail').textContent = `(score: ${d.score})`;
+      } else {
+        banner.style.display = 'none';
+      }
+
+      // Highlight high CPU/mem cards
+      setCard('cpu-card', d.cpu_percent > 80);
+      setCard('mem-card', d.mem_percent > 85);
+
+      // Push to charts
+      pushData(chartCpu,   ts, d.cpu_percent);
+      pushData(chartMem,   ts, d.mem_percent);
+      pushData(chartNet,   ts, d.net_recv_mb);
+      if (d.score !== null) pushData(chartScore, ts, d.score);
+
+    } catch(e) { console.error('Live fetch failed', e); }
+  }
+
+  // ── Anomaly log fetch ────────────────────────────────────
+  async function fetchAnomalies() {
+    try {
+      const res  = await fetch('/api/anomalies');
+      const rows = await res.json();
+      const tbody = document.getElementById('anomaly-tbody');
+      const table = document.getElementById('anomaly-table');
+      const none  = document.getElementById('no-anomalies');
+      const count = document.getElementById('anomaly-count');
+
+      count.textContent = `${rows.length} flagged`;
+
+      if (rows.length === 0) {
+        table.style.display = 'none';
+        none.style.display  = 'block';
+        return;
+      }
+      none.style.display  = 'none';
+      table.style.display = 'table';
+
+      tbody.innerHTML = rows.slice(0, 20).map(r => `
+        <tr>
+          <td>${r.timestamp.replace('T', ' ').slice(0,19)}</td>
+          <td style="color:var(--anomaly)">${r.score ?? '—'}</td>
+          <td>${r.cpu_percent?.toFixed(1) ?? '—'}</td>
+          <td>${r.mem_percent?.toFixed(1) ?? '—'}</td>
+          <td>${r.num_processes ?? '—'}</td>
+          <td style="color:var(--muted)">${r.top_cpu_proc ?? '—'}</td>
+          <td><span class="tag tag-anomaly">anomaly</span></td>
+        </tr>
+      `).join('');
+    } catch(e) { console.error('Anomaly fetch failed', e); }
+  }
+
+  // ── Init ─────────────────────────────────────────────────
+  fetchLive();
+  fetchAnomalies();
+  setInterval(fetchLive, 3000);
+  setInterval(fetchAnomalies, 15000);
+</script>
+</body>
+</html>
